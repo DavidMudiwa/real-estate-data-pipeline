@@ -142,3 +142,4 @@ with DAG(
         >> update_collections_task
         >> end
     )
+
