@@ -1,7 +1,9 @@
-#!/usr/bin/env python3
 """
 Incremental MongoDB Ingestion Script
-
+Description:
+Fetches new documents from remote MongoDB collections using
+last processed ObjectId tracking. Writes results to CSV and
+updates ingestion metadata for incremental processing.
 """
 
 import os
@@ -15,7 +17,6 @@ import pytz
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import PyMongoError
 from bson.objectid import ObjectId
-
 
 # =============================================================================
 # Configuration
@@ -33,7 +34,6 @@ SNAPSHOT_PREFIX = {
     "sold": "sold_au",
 }
 
-
 # =============================================================================
 # Logging Setup
 # =============================================================================
@@ -46,7 +46,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-
 # =============================================================================
 # Utilities
 # =============================================================================
@@ -54,17 +53,14 @@ logger = logging.getLogger(__name__)
 def get_batch_id() -> str:
     return datetime.now(AU_TZ).strftime("%Y%m%d%H%M%S")
 
-
 def ensure_output_dir():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
 
 def safe_object_id(value: Optional[str]) -> Optional[ObjectId]:
     try:
         return ObjectId(value) if value else None
     except Exception:
         return None
-
 
 def write_csv(filepath: str, docs: List[Dict]):
     if not docs:
@@ -79,7 +75,6 @@ def write_csv(filepath: str, docs: List[Dict]):
         writer.writerows(docs)
 
     logger.info("Wrote %s records to %s", len(docs), filepath)
-
 
 # =============================================================================
 # Core Logic
