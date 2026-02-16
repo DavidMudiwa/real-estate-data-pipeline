@@ -209,7 +209,5 @@ This repository provides:
 - A modular property data ETL pipeline  
 - Manual execution capability for development  
 - Airflow orchestration for production automation  
-- Reusable processing logic across multiple data pipelines  
-- Deterministic address matching with GNAF  
-- Intelligent transaction merging and state management  
+- Reusable processing logic across multiple data pipelines
 ```
