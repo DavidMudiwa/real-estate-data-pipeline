@@ -95,13 +95,14 @@ Multiple DAGs reuse the same core processing modules:
 - `finalize_addresses.py`
 - `run_address_matching.py`
 - `transaction_processor.py`
+- `update_property_collections.py`
 
 Data-type-specific scripts include:
 
 - `clean_sold_data.py`
 - `clean_sale_data.py`
 - `clean_leased_data.py`
-- `<data_type>_agent_property_matching.py`
+- `sold_agent_property_matching.py`
 
 This modular design ensures:
 
@@ -156,7 +157,7 @@ Scripts must be executed in this order:
 2. `finalize_addresses.py`
 3. `clean_<data_type>_data.py`
 4. `run_address_matching.py`
-5. `<data_type>_agent_property_matching.py`
+5. `<data_type>_upsert.py`
 6. `transaction_processor.py`
 
 Replace `<data_type>` with:
@@ -188,7 +189,7 @@ sold_data_dag.py
 sale_data_dag.py
 leased_data_dag.py
 
-src/
+script/
 process_addresses.py
 finalize_addresses.py
 run_address_matching.py
