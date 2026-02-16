@@ -1,9 +1,8 @@
-```md
-# Property Data Processing – ETL Pipeline Documentation
+# Property Data Processing  Documentation
 
 ## Overview
 
-This repository contains a production-grade property transaction data pipeline.
+This repository contains a production grade property transaction data pipeline.
 
 The pipeline processes property data through:
 
