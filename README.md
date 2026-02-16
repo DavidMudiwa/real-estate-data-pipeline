@@ -8,7 +8,7 @@ The pipeline processes property data through:
 
 1. Address cleansing (libpostal parsing)  
 2. Address finalization and normalization  
-3. Field-level data cleaning  
+3. Field level data cleaning  
 4. GNAF address matching  
 5. Transaction upsert into MongoDB  
 6. Current state recalculation  
@@ -28,7 +28,7 @@ Each data type has its own Airflow DAG, but they share common processing scripts
 
 The scripts can be executed in two ways:
 
-### 1️⃣ Manual Execution (Step-by-Step)
+### Manual Execution (Step-by-Step)
 
 Each script can be run independently via command line.
 
@@ -43,7 +43,7 @@ Scripts must be executed in sequence because each stage depends on the previous 
 
 ---
 
-### 2️⃣ Scheduled Execution via Apache Airflow
+###  Scheduled Execution via Apache Airflow
 
 The `dags/` folder contains multiple DAGs, including:
 
@@ -51,7 +51,7 @@ The `dags/` folder contains multiple DAGs, including:
 - Sale data pipeline  
 - Leased data pipeline  
 
-Although each DAG handles a different data source, they reuse many of the same core scripts (address processing, matching, transaction logic).
+Although each DAG handles a different data source, they reuse many of the same core scripts (address processing, matching, transaction processing).
 
 Each DAG:
 
