@@ -5,217 +5,172 @@ Fetches new documents from remote MongoDB collections using
 last processed ObjectId tracking. Writes results to CSV and
 updates ingestion metadata for incremental processing.
 """
-
 import os
+import re
+import pytz
+from datetime import datetime
+from pymongo import MongoClient, ASCENDING
+from bson.objectid import ObjectId
 import sys
 import csv
-import logging
 import argparse
-from datetime import datetime
-from typing import List, Dict, Optional
-import pytz
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import PyMongoError
-from bson.objectid import ObjectId
 
-# =============================================================================
-# Configuration
-# =============================================================================
-
+# --- Configuration ---
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aggregate_ssr.log')
+SNAPSHOT_PREFIX = {"sale": "sale_au", "rent": "rent_au", "sold": "sold_au"}
+METADATA_COLL = "aggregate_state"
 AU_TZ = pytz.timezone("Australia/Sydney")
-METADATA_COLLECTION = os.getenv("METADATA_COLLECTION", "aggregate_state")
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-MONGO_TIMEOUT_MS = int(os.getenv("MONGO_TIMEOUT_MS", "10000"))
 
-SNAPSHOT_PREFIX = {
-    "sale": "sale_au",
-    "rent": "rent_au",
-    "sold": "sold_au",
-}
-
-# =============================================================================
-# Logging Setup
-# =============================================================================
-
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-
-logger = logging.getLogger(__name__)
-
-# =============================================================================
-# Utilities
-# =============================================================================
-
-def get_batch_id() -> str:
-    return datetime.now(AU_TZ).strftime("%Y%m%d%H%M%S")
-
-def ensure_output_dir():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-def safe_object_id(value: Optional[str]) -> Optional[ObjectId]:
+# --- Helper Functions ---
+def log(msg):
+    """Logs a message to both the console and a log file."""
+    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    line = f"[{timestamp}] {msg}"
+    print(line)
     try:
-        return ObjectId(value) if value else None
-    except Exception:
-        return None
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(line + '\n')
+    except Exception as e:
+        print(f"[LOGGING ERROR] {e}")
 
-def write_csv(filepath: str, docs: List[Dict]):
-    if not docs:
-        logger.info("No documents to write.")
+def _update_airflow_summary(fields: dict):
+    mongo_uri = os.getenv("AIRFLOW_SUMMARY_MONGO_URI")
+    coll_name = os.getenv("AIRFLOW_SUMMARY_COLLECTION")  # sold/sale/rent
+    run_summary_id = os.getenv("AIRFLOW_RUN_SUMMARY_ID")
+
+    if not mongo_uri or not coll_name or not run_summary_id:
         return
 
-    headers = list({k for doc in docs for k in doc.keys()})
+    try:
+        client = MongoClient(mongo_uri)
+        coll = client["airflow_summaries"][coll_name]
+        coll.update_one({"_id": ObjectId(run_summary_id)}, {"$set": fields}, upsert=False)
+    except Exception as e:
+        print(f"[SUMMARY_UPDATE_ERROR] {e}")
 
-    with open(filepath, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(docs)
+def get_au_batch_id():
+    """Return current Sydney timestamp as ibis-compliant YYYYMMDDHHmmSS."""
+    return datetime.now(AU_TZ).strftime("%Y%m%d%H%M%S")
 
-    logger.info("Wrote %s records to %s", len(docs), filepath)
+def write_csv(filename, docs):
+    """Writes a list of dictionaries to a CSV file."""
+    if not docs:
+        log(f"INFO: No documents to write for {filename}.")
+        return
+    headers = []
+    for d in docs:
+        for k in d.keys():
+            if k not in headers:
+                headers.append(k)
+    try:
+        with open(filename, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(docs)
+        log(f"SUCCESS: Wrote {len(docs)} records to {filename}")
+    except IOError as e:
+        log(f"FATAL: Failed to write CSV file {filename} ({e})")
 
-# =============================================================================
-# Core Logic
-# =============================================================================
-
-def process_database(
-    db_name: str,
-    date_str: str,
-    mongo_uri: str,
-    dry_run: bool = False
-):
-    logger.info("Starting ingestion for database: %s", db_name)
+# --- Main Processing Function ---
+def process_database(db_name, date_str, remote_client):
+    """Fetch new docs from remote DB and write them to a CSV file."""
+    log(f"=== Processing remote DB: '{db_name}' for date {date_str} ===")
+    try:
+        remote_db = remote_client[db_name]
+        metadata = remote_db[METADATA_COLL]
+        metadata.create_index([("agency_name", ASCENDING)])
+    except Exception as e:
+        log(f"ERROR: Cannot access remote DB '{db_name}' ({e}). Skipping.")
+        return
 
     prefix = SNAPSHOT_PREFIX.get(db_name)
     if not prefix:
-        logger.error("Invalid db_type provided.")
-        sys.exit(1)
+        log(f"WARNING: No SNAPSHOT_PREFIX for '{db_name}'; skipping.")
+        return
 
-    client = MongoClient(
-        mongo_uri,
-        serverSelectionTimeoutMS=MONGO_TIMEOUT_MS,
-    )
+    output_csv_filename = f"{prefix}_{date_str}.csv"
+    log(f"→ Output will be written to: '{output_csv_filename}'")
 
     try:
-        client.admin.command("ping")
-    except PyMongoError as e:
-        logger.error("MongoDB connection failed: %s", e)
-        sys.exit(1)
+        source_cols = [c for c in remote_db.list_collection_names() if c != METADATA_COLL]
+    except Exception as e:
+        log(f"ERROR: Cannot list collections in remote DB '{db_name}' ({e}); skipping.")
+        return
 
-    db = client[db_name]
-    metadata = db[METADATA_COLLECTION]
-    metadata.create_index([("agency_name", ASCENDING)])
-
-    collections = [
-        c for c in db.list_collection_names()
-        if c != METADATA_COLLECTION
-    ]
-
-    batch_id = get_batch_id()
-    all_new_docs = []
-
-    for collection_name in sorted(collections):
-        logger.info("Processing collection: %s", collection_name)
-
-        previous_state = metadata.find_one(
-            {"agency_name": collection_name}
-        ) or {}
-
-        last_id = safe_object_id(previous_state.get("last_id"))
-
-        query = {"_id": {"$gt": last_id}} if last_id else {}
-
+    batch_id = get_au_batch_id()
+    all_new_docs_for_csv = []
+    
+    for src_name in sorted(source_cols):
+        log(f"• Processing source collection: '{src_name}'")
         try:
-            new_docs = list(
-                db[collection_name]
-                .find(query)
-                .sort("_id", ASCENDING)
-            )
-        except PyMongoError as e:
-            logger.error("Query failed for %s: %s", collection_name, e)
-            continue
+            # Find the previous state to get old values
+            previous_state = metadata.find_one({"agency_name": src_name})
+            if not previous_state:
+                previous_state = {} # Handle first-run case
 
-        if not new_docs:
-            logger.info("No new documents for %s", collection_name)
-            continue
+            last_id = previous_state.get("last_id")
+            query = {"_id": {"$gt": ObjectId(last_id)}} if last_id else {}
+            
+            src_coll = remote_db[src_name]
+            new_docs = list(src_coll.find(query).sort("_id", ASCENDING))
 
-        last_written_id = str(new_docs[-1]["_id"])
-
-        if not dry_run:
-            metadata.replace_one(
-                {"agency_name": collection_name},
-                {
-                    "agency_name": collection_name,
+            if new_docs:
+                last_insert_count = len(new_docs)
+                last_written_id = str(new_docs[-1]['_id'])
+                
+                # Create the new, detailed metadata document
+                new_metadata_doc = {
+                    "agency_name": src_name,
                     "last_run": datetime.utcnow(),
                     "last_id": last_written_id,
-                    "batch_id": batch_id,
-                    "record_count": len(new_docs),
-                },
-                upsert=True,
-            )
+                    "batchId": batch_id,
+                    "last_insert_count": last_insert_count,
+                    "previous_last_run_id": previous_state.get("last_id"),
+                    "previous_last_run": previous_state.get("last_run"),
+                    "previous_batchId": previous_state.get("batchId")
+                }
 
-        logger.info(
-            "Found %s new records for %s",
-            len(new_docs),
-            collection_name,
-        )
+                metadata.replace_one(
+                    {"agency_name": src_name},
+                    new_metadata_doc,
+                    upsert=True
+                )
+                
+                all_new_docs_for_csv.extend(new_docs)
+                log(f"– Found {last_insert_count} new docs. Updated metadata with last_id: {last_written_id}")
+            else:
+                log(f"– No new documents found for '{src_name}'.")
+        except Exception as e:
+            log(f"ERROR: Failed during processing of '{src_name}' ({e}); skipping source.")
+            continue
 
-        all_new_docs.extend(new_docs)
+    write_csv(output_csv_filename, all_new_docs_for_csv)
+    _update_airflow_summary({
+    "total_records_ingested": len(all_new_docs_for_csv),
+    })
+    log(f"✅ Finished processing '{db_name}'.")
 
-    ensure_output_dir()
-    output_file = os.path.join(
-        OUTPUT_DIR,
-        f"{prefix}_{date_str}.csv",
-    )
-
-    if not dry_run:
-        write_csv(output_file, all_new_docs)
-
-    logger.info("Ingestion complete. Total records: %s", len(all_new_docs))
-
-
-# =============================================================================
-# Entry Point
-# =============================================================================
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Incremental MongoDB ingestion."
-    )
-    parser.add_argument(
-        "db_type",
-        choices=["rent", "sale", "sold"],
-        help="Database type to process.",
-    )
-    parser.add_argument(
-        "--date",
-        dest="date_str",
-        help="Date in YYYYMMDD format.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Run without writing data or updating metadata.",
-    )
-
-    args = parser.parse_args()
-
-    mongo_uri = os.getenv("REMOTE_URI")
-    if not mongo_uri:
-        logger.error("REMOTE_URI environment variable not set.")
+def main(args):
+    """Main function to connect to remote DB and start processing."""
+    remote_uri = os.getenv('REMOTE_URI')
+    if not remote_uri:
+        log("FATAL: REMOTE_URI environment variable not set. Exiting.")
         sys.exit(1)
 
-    date_str = args.date_str or datetime.now(AU_TZ).strftime("%Y%m%d")
+    try:
+        remote_client = MongoClient(remote_uri)
+        remote_client.admin.command('ping')
+    except Exception as e:
+        log(f"FATAL: Cannot connect to remote MongoDB ({e}); exiting.")
+        sys.exit(1)
 
-    process_database(
-        db_name=args.db_type,
-        date_str=date_str,
-        mongo_uri=mongo_uri,
-        dry_run=args.dry_run,
-    )
-
+    date_str = args.date_str if args.date_str else datetime.now(AU_TZ).strftime("%Y%m%d")
+    
+    process_database(args.db_type, date_str, remote_client)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Ingest data from SSR databases.")
+    parser.add_argument('db_type', choices=['rent', 'sale', 'sold'], help="The type of data to process.")
+    parser.add_argument('--date', dest='date_str', help="Date string in YYYYMMDD format for the output filename.")
+    args = parser.parse_args()
+    main(args)
